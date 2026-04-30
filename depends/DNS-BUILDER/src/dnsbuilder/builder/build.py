@@ -1,0 +1,516 @@
+import yaml
+import logging
+import json
+from typing import Dict, Tuple, Optional
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+from ..abstractions import Image
+from ..factories import ImageFactory
+from ..bases import SelfDefinedImage, DockerImage
+from ..datacls import BuildContext
+from .map import Mapper, GraphGenerator
+from .substitute import VariableSubstitutor
+from .resolve import Resolver
+from .net import NetworkManager
+from .service import ServiceHandler
+from .dnssec import DNSSECHandler
+from .image import ImageBuilder
+from .. import constants
+from ..config import Config
+from ..io import DNSBPath, FileSystem
+from ..exceptions import BuildError, DNSBuilderError, ImageDefinitionError, DefinitionError
+from ..auto import AutomationManager
+from ..utils.fstree import print_tree, count_files
+from ..plugins import get_plugin_manager
+
+logger = logging.getLogger(__name__)
+
+class Builder:
+
+    def __init__(self, config: Config, graph_output: Optional[str] = None, fs: FileSystem = None, output_dir: DNSBPath = None):
+        self.config = config
+        self.graph_output = graph_output
+        if fs is None:
+            raise DefinitionError("FileSystem is not provided.")
+        self.fs = fs        
+        if output_dir is not None:
+            self.output_dir = output_dir
+        else:
+            self.output_dir = DNSBPath("output") / self.config.name
+        
+        self.pr_blds = self._load_pr_blds()
+        self.ic: Dict[str, Image] = {}
+        # Get plugin registry for auto helper injection
+        plugin_registry = get_plugin_manager().registry
+        # Initialize AutomationManager with plugin registry for helper injection
+        self.am = AutomationManager(fs=fs, plugin_registry=plugin_registry)
+        # Initialize ImageBuilder for shared image management
+        self.ib = ImageBuilder()
+        logger.debug(f"Builder initialized for project '{self.config.name}'. Output dir: '{self.output_dir}'")
+
+    async def run(self, need_context: bool = False) -> Optional[BuildContext]:
+        """Orchestrates the entire build process step by step."""
+        logger.info(f"[Builder] Starting build for project '{self.config.name}'...")
+        self._setup()
+
+        # Initialize context and resolve all defined images from the 'images' block
+        context = self._init_ctx()
+
+        # Execute setup phase automation
+        logger.debug("[Builder] Executing AutomationManager setup phase...")
+        config_data = self.config.model.model_dump(by_alias=True, exclude_none=True)
+        self.am.setup(config_data)
+        
+        # Update config with modified data from setup phase
+        self.config.model = self.config.model.model_validate(config_data)
+        
+        # Update context with potentially new images
+        context = self._init_ctx()
+
+        # Resolve all service build configurations, handling inheritance and mixins
+        logger.debug("[Builder] Invoking Resolver for build configurations...")
+        resolved_builds = self._resolve(context)
+        context = context.model_copy(update={'resolved_builds': resolved_builds})
+
+        # Plan network addresses for all services
+        logger.debug("[Builder] Invoking NetworkManager for IP planning...")
+        service_ips, reserved_ips = self._plan_net(context)
+        context = context.model_copy(update={"service_ips": service_ips, "reserved_ips": reserved_ips})
+
+        # Substitute variables (like ${name}, ${ip}) in the entire config
+        logger.debug("[Builder] Invoking VariableSubstitutor for variable replacement...")
+        config_data = self._sub_var(context)
+        # Update both config and resolved_builds from the substituted result
+        context.config.model = context.config.model.model_validate(config_data)
+        context = context.model_copy(update={'resolved_builds': config_data['builds']})
+
+        # Map the network topology and generate a graph if requested
+        logger.debug("[Builder] Invoking Mapper for topology analysis...")
+        self._map(context)
+
+        # Execute modify phase automation
+        logger.debug("[Builder] Executing AutomationManager modify phase...")
+        config_data = context.config.model.model_dump(by_alias=True, exclude_none=True)
+        config_data['builds'] = context.resolved_builds
+        self.am.modify(config_data)
+
+        # Update context with modified resolved builds and config
+        context = context.model_copy(update={'resolved_builds': config_data['builds']})
+        context.config.model = context.config.model.model_validate(config_data)
+
+        # Generate artifacts (Dockerfiles, configs) for each service
+        logger.debug("[Builder] Invoking ServiceHandler for artifact generation...")
+        compose_services = await self._generate(context)
+        
+        # Execute restrict phase automation
+        logger.debug("[Builder] Executing AutomationManager restrict phase...")
+        config_data = context.config.model.model_dump(by_alias=True, exclude_none=True)
+        config_data['builds'] = context.resolved_builds
+        results = self.am.restrict(config_data)
+        for res in results:
+            for srv, _res in res.items():
+                if _res != "PASS":
+                    raise BuildError(f"Restrict phase failed for service {srv}")
+
+        # Assemble the final docker-compose.yml file and write it to disk
+        self._assemble(compose_services, context)
+        
+        # Execute post phase automation
+        logger.debug("[Builder] Executing AutomationManager post phase...")
+        config_data = context.config.model.model_dump(by_alias=True, exclude_none=True)
+        config_data['builds'] = context.resolved_builds
+        self.am.post(config_data, self.output_dir)
+        
+        logger.info(f"[Builder] Build finished. Files are in '{self.output_dir}'")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[Builder] Final project structure:")
+            self.show_tree(max_depth=5, show_size=True)
+        if need_context:
+            return context
+        return None
+
+    def _init_ctx(self) -> BuildContext:
+        """Creates the initial build context and resolves images defined in the config."""
+        logger.debug("[Builder] Initializing context...")
+        image_factory = ImageFactory(
+            self.config.images_config, 
+            global_mirror=self.config.mirror,
+            fs=self.fs
+        )
+        resolved_images = image_factory.create_all()
+        self.ic.update(resolved_images) # Cache the explicitly defined images
+        
+        context = BuildContext(
+            config=self.config,
+            images=resolved_images,
+            output_dir=self.output_dir,
+            fs=self.fs
+        )
+        logger.debug("[Builder] Initial build context created.")
+        return self._rlv_all_imgs(context)
+
+    def _resolve(self, context: BuildContext) -> Dict:
+        """Resolves the flattened configuration for each service."""
+        logger.debug("[Resolver] Resolving build configurations...")
+        resolver = Resolver(context.config, context.images, self.pr_blds)
+        resolved_builds = resolver.resolve_all()
+        resolved_builds = {key : value for key, value in resolved_builds.items() if value.get("build")}
+        logger.debug("[Resolver] Build resolution complete.")
+        return resolved_builds
+
+    def _plan_net(self, context: BuildContext) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Allocates IP addresses to services."""
+        logger.debug("[NetworkManager] Planning network addresses...")
+        nm = NetworkManager(self.config.inet)
+        service_ips, reserved_ips = nm.plan(context.resolved_builds)
+        logger.debug("[NetworkManager] Network planning complete.")
+        return service_ips, reserved_ips
+
+    def _sub_var(self, context: BuildContext) -> Dict:
+        """Performs variable substitution across the entire config including builds and top-level extra fields."""
+        logger.debug("[VariableSubstitutor] Substituting variables...")
+        
+        # Prepare full config dict with resolved builds
+        config_data = context.config.model.model_dump(by_alias=True, exclude_none=True)
+        config_data['builds'] = context.resolved_builds
+        
+        substitutor = VariableSubstitutor(
+            config=context.config,
+            images=context.images,
+            service_ips=context.service_ips,
+            reserved_ips=context.reserved_ips,
+            resolved_builds=context.resolved_builds,
+            fs=context.fs
+        )
+        substituted_config = substitutor.run(config_data)
+        logger.debug("[VariableSubstitutor] Variable substitution complete.")
+        return substituted_config
+
+    def _map(self, context: BuildContext):
+        """Analyzes service behaviors to map the network topology."""
+        logger.debug("[Mapper] Mapping topology...")
+        mapper = Mapper(context.resolved_builds, context.service_ips)
+        topology = mapper.mapt()
+        if self.graph_output:
+            if GraphGenerator is None:
+                logger.warning("[GraphGenerator] Graphviz library not found, skipping graph generation.")
+            else:
+                graph_gen = GraphGenerator(topology, context.service_ips, self.config.name, self.fs)
+                graph_gen.generate(self.graph_output)
+        logger.debug("[Mapper] Topology mapping complete.")
+
+    def _rlv_all_imgs(self, context: BuildContext) -> BuildContext:
+        """
+        Ensures all images referenced by services are resolved and cached.
+        This includes images not explicitly defined in the top-level 'images' block.
+        """
+        logger.debug("[Builder] Resolving service images...")
+        source_builds = context.resolved_builds or context.config.builds_config
+        for name, conf in source_builds.items():
+            image_name = conf.get('image')
+            if image_name:
+                # This will resolve and cache the image if not already present.
+                self._get_img(image_name)
+
+        # Update the context with the full image cache
+        updated_context = context.model_copy(update={'images': self.ic})
+        logger.debug("[Builder] Service image resolution complete.")
+        return updated_context
+
+    def _get_img(self, image_name: str) -> Image:
+        """
+        Resolves an image name string to an Image object.
+        Handles internal, local, and remote images.
+        """
+        if image_name in self.ic:
+            return self.ic[image_name]
+
+        # Try to resolve as SelfDefinedImage first.
+        try:
+            logger.debug(f"Image '{image_name}' resolved as a self-defined build context path.")
+            config = {"name": image_name, "ref": image_name}
+            image_obj = SelfDefinedImage(config, fs=self.fs)
+            self.ic[image_name] = image_obj
+            return image_obj
+        except (TypeError, ValueError, OSError, DNSBuilderError):
+            # Not a SelfDefinedImage
+            pass
+        except Exception:
+            # error
+            raise
+
+        # Default to DockerImage.
+        logger.debug(f"Image '{image_name}' resolved as a Docker image.")
+        logger.warning(f"You choose a Docker Image '{image_name}', if not check the path of Self-Defined Image.")
+        config = {"name": image_name, "ref": image_name}
+        image_obj = DockerImage(config, fs=self.fs)
+        self.ic[image_name] = image_obj
+        return image_obj
+
+    async def _generate(self, context: BuildContext) -> Dict[str, Dict]:
+        """Generates all artifacts for each buildable service."""
+        logger.debug("[ServiceHandler] Generating services...")
+        
+        buildable_services = {
+            name: conf for name, conf in context.resolved_builds.items()
+            if conf.get('build', True)
+        }
+        logger.info(f"[ServiceHandler] Found {len(buildable_services)} buildable services.")
+
+        # Create barrier for synchronization before volume processing
+        num_services = len(buildable_services)
+        
+        # Track which services reach the barrier for debugging
+        import threading
+        barrier_arrivals = set()
+        barrier_lock = threading.Lock()
+        
+        def track_arrival(service_name):
+            """Thread-safe tracking of barrier arrivals"""
+            with barrier_lock:
+                barrier_arrivals.add(service_name)
+                logger.debug(f"[ServiceHandler] Service '{service_name}' reached barrier ({len(barrier_arrivals)}/{num_services})")
+        
+        # Create DNSSEC handler and set it as barrier action
+        dnssec_handler = DNSSECHandler(context)
+        
+        # Wrap barrier action to catch and log any exceptions
+        def safe_barrier_action():
+            """Wrapper for barrier action to ensure exceptions don't break the barrier"""
+            try:
+                with barrier_lock:
+                    arrived = sorted(barrier_arrivals)
+                    all_services = sorted(buildable_services.keys())
+                    missing = sorted(set(all_services) - barrier_arrivals)
+                logger.info(f"[ServiceHandler] Barrier released! {len(barrier_arrivals)}/{num_services} services arrived")
+                logger.debug(f"[ServiceHandler] Services that arrived: {arrived}")
+                if missing:
+                    logger.warning(f"[ServiceHandler] Services that did NOT arrive at barrier: {missing}")
+                logger.debug(f"[ServiceHandler] Barrier action starting (DNSSEC processing)...")
+                dnssec_handler.run()
+                logger.debug(f"[ServiceHandler] Barrier action completed successfully")
+            except Exception as e:
+                import traceback
+                logger.error(f"[ServiceHandler] CRITICAL: Barrier action failed with exception!")
+                logger.error(f"  Exception type: {type(e).__name__}")
+                logger.error(f"  Exception message: {e}")
+                logger.error(f"  Traceback:\n{''.join(traceback.format_tb(e.__traceback__))}")
+                # Don't re-raise - this would break the barrier
+        
+        barrier = threading.Barrier(num_services, action=safe_barrier_action) if num_services > 0 else None
+        
+        if barrier:
+            logger.info(f"[ServiceHandler] Created barrier for {num_services} services.")
+
+        loop = asyncio.get_running_loop()
+        # Ensure thread pool has enough workers for all services to avoid barrier deadlock
+        # When services wait at barrier, they block their threads. If pool is too small,
+        # some services never get a thread to reach the barrier, causing timeout.
+        max_workers = max(num_services, 32)  # At least as many as services, minimum 32
+        logger.debug(f"[ServiceHandler] Creating thread pool with {max_workers} workers for {num_services} services")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            tasks = []
+            for name, conf in buildable_services.items():
+                logger.debug(f"[ServiceHandler] Handling buildable service: '{name}'")
+                if 'image' not in conf:
+                    raise ImageDefinitionError(f"Buildable service '{name}' is missing the required 'image' key.")
+
+                handler = ServiceHandler(name, context, image_builder=self.ib, barrier=barrier, barrier_tracker=track_arrival)
+                tasks.append(loop.run_in_executor(executor, handler.generate_all))
+            
+            # Gather results with exception handling to prevent barrier deadlock
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Check for exceptions in results and provide detailed error information
+        import traceback
+        failed_services = []
+        root_cause_services = []  # Services with real errors (not barrier-related)
+        barrier_failed_services = []  # Services that failed due to broken barrier
+        
+        for name, result in zip(buildable_services.keys(), results):
+            if isinstance(result, Exception):
+                failed_services.append((name, result))
+                # Distinguish between root cause errors and cascading barrier errors
+                error_msg = str(result)
+                if "barrier synchronization failed: another service encountered an error" in error_msg:
+                    barrier_failed_services.append((name, result))
+                else:
+                    # This is a real error, not a cascading barrier error
+                    root_cause_services.append((name, result))
+                    logger.error(f"[ServiceHandler] Service '{name}' failed with exception:")
+                    logger.error(f"  Exception type: {type(result).__name__}")
+                    logger.error(f"  Exception message: {result}")
+                    if hasattr(result, '__traceback__'):
+                        tb_lines = traceback.format_tb(result.__traceback__)
+                        logger.error(f"  Traceback:\n{''.join(tb_lines)}")
+        
+        # If any service failed, abort the barrier and raise a comprehensive error
+        if failed_services:
+            if barrier:
+                try:
+                    barrier.abort()
+                except Exception as e:
+                    logger.debug(f"[ServiceHandler] Barrier already aborted or broken: {e}")
+            
+            # Report summary with emphasis on root causes
+            if root_cause_services:
+                logger.error(f"[ServiceHandler] {len(root_cause_services)} service(s) failed with errors:")
+                for name, exc in root_cause_services:
+                    logger.error(f"  - {name}: {type(exc).__name__}: {exc}")
+                if barrier_failed_services:
+                    logger.info(f"[ServiceHandler] {len(barrier_failed_services)} additional service(s) failed due to barrier synchronization")
+                # Raise the first root cause exception
+                raise root_cause_services[0][1]
+            else:
+                # All failures are barrier-related (shouldn't happen but handle it)
+                logger.error(f"[ServiceHandler] All {len(failed_services)} service(s) failed due to barrier issues")
+                raise failed_services[0][1]
+        
+        compose_services = {
+            name: result 
+            for name, result in zip(buildable_services.keys(), results)
+        }
+        
+        logger.debug("[ServiceHandler] All services generated.")
+        return compose_services
+         
+    def _assemble(self, services: Dict, context: BuildContext):
+        """Assembles the final docker-compose dictionary and writes it to a YAML file."""
+        logger.debug("[Builder] Assembling final docker-compose file...")
+        
+        # Generate builder services for shared images
+        builder_services = self.ib.gen_srv()
+        
+        # Log builder summary
+        if builder_services:
+            summary = self.ib.get_summary()
+            logger.info(
+                f"[ImageBuilder] Generated {summary['total_shared_images']} builder service(s) "
+                f"for {summary['total_consumers']} consumer service(s)"
+            )
+        
+        # Merge builder services and regular services (builders first for clarity)
+        all_services = {**builder_services, **services}
+        
+        compose_config = {
+            "name": self.config.name,
+            "services": all_services,
+            "networks": NetworkManager(self.config.inet).compose()
+        }
+        
+        all_config_data = self.config.model.model_dump()
+        extra_config = {
+            key: value for key, value in all_config_data.items() 
+            if key not in constants.RESERVED_CONFIG_KEYS
+        }
+        if extra_config:
+            logger.debug(f"[Builder] Adding extra top-level configurations to docker-compose: {list(extra_config.keys())}")
+            compose_config.update(extra_config)
+
+        self._compose(compose_config)
+
+    def _load_pr_blds(self) -> Dict[str, Dict]:
+        """
+        Load predefined build templates from templates directory.
+        """
+        logger.debug("Loading predefined build templates...")
+        templates: Dict[str, Dict] = {}
+
+        # Load from built-in templates directory
+        templates_dir = DNSBPath("resource:/builder/templates")
+        try:
+            # List all template files in the directory
+            template_files = self.fs.listdir(templates_dir)
+            for template_path in template_files:
+                # Get the filename from the path
+                template_file = template_path.name
+                # Skip __init__.py and other non-template files
+                if template_file.startswith("__") or template_file.startswith("."):
+                    continue
+
+                try:
+                    content = self.fs.read_text(template_path)
+                    software_templates = json.loads(content)
+                    # Use filename as software name
+                    software_name = template_file
+                    templates[software_name] = software_templates
+                    logger.debug(f"Loaded templates for '{software_name}' from {template_path}")
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.warning(f"Failed to load template '{template_file}': {e}")
+
+            logger.debug(f"Loaded {len(templates)} built-in template(s): {list(templates.keys())}")
+
+        except FileNotFoundError:
+            logger.debug("No templates directory found, skipping built-in templates")
+        except Exception as e:
+            logger.warning(f"Error loading built-in templates: {e}")
+
+        return templates
+
+    def _setup(self):
+        with self.fs.fallback(enable=False):
+            if self.fs.exists(self.output_dir): 
+                logger.debug(f"[Builder] Output directory '{self.output_dir}' exists. Cleaning it up.")
+                self.fs.rmtree(self.output_dir)
+            self.fs.mkdir(self.output_dir, parents=True)
+            logger.debug(f"[Builder] Workspace initialized at '{self.output_dir}'.")
+    
+    def _compose(self, compose_config: Dict):
+        file_path = self.output_dir / constants.DOCKER_COMPOSE_FILENAME
+        logger.debug(f"[Builder] Writing final docker-compose configuration to '{file_path}'...")
+        content = yaml.dump(compose_config, default_flow_style=False, sort_keys=False)
+        self.fs.write_text(file_path, content)
+        logger.info(f"[Builder] {constants.DOCKER_COMPOSE_FILENAME} successfully generated at {file_path}")
+
+    def show_tree(self, max_depth: int = -1, show_size: bool = False):
+        """
+        Display the generated project structure as a tree.
+        
+        Args:
+            max_depth: Maximum depth to display (-1 for unlimited)
+            show_size: Whether to show file sizes
+        """
+        logger.debug(f"Project Structure: {self.config.name}")
+        
+        # Disable fallback to only show actually generated content
+        with self.fs.fallback(enable=False):
+            if not self.fs.exists(self.output_dir):
+                logger.debug(f"Output directory does not exist: {self.output_dir}")
+                return
+            
+            print_tree(self.fs, self.output_dir, max_depth=max_depth, show_size=show_size)
+            
+            # Show statistics
+            counts = count_files(self.fs, self.output_dir, recursive=True)
+            logger.debug(f"Total: {counts['dirs']} directories, {counts['files']} files")
+    
+    def get_build_summary(self) -> Dict:
+        """
+        Get a summary of the build output.
+        
+        Returns:
+            Dict with structure information
+        """
+        with self.fs.fallback(enable=False):
+            if not self.fs.exists(self.output_dir):
+                return {'exists': False}
+            
+            counts = count_files(self.fs, self.output_dir, recursive=True)
+            
+            services = []
+            try:
+                for item in self.fs.listdir(self.output_dir):
+                    if self.fs.is_dir(item) and item.name not in ['.images']:
+                        services.append(item.name)
+            except Exception as e:
+                logger.debug(f"Failed to list services: {e}")
+            
+            return {
+                'exists': True,
+                'output_dir': str(self.output_dir),
+                'total_dirs': counts['dirs'],
+                'total_files': counts['files'],
+                'services': sorted(services)
+            }

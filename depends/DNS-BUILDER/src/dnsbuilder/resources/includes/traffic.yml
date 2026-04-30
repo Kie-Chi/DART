@@ -1,0 +1,15 @@
+name: traffic-config
+images:
+  - name: traffic
+    ref: "python:3.9.0"
+    util:
+      - supervisor
+      - tshark
+      - bind9-utils
+      - unbound
+      - python3-dnspython
+builds:
+  traffic:
+    image: traffic
+    ref: monitor:traffic
+    container_name: ${project.name}-monitor

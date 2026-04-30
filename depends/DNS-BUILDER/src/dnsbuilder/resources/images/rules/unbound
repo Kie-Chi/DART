@@ -1,0 +1,27 @@
+[
+    { "range": "[1.5.0rc1, 1.5.10]", "set": "valid" },
+    { "range": "[1.6.0rc1, 1.6.8]", "set": "valid" },
+    { "range": "[1.7.0rc1, 1.7.3]", "set": "valid" },
+    { "range": "[1.8.0rc1, 1.8.3]", "set": "valid" },
+    { "range": "[1.9.0rc1, 1.9.6]", "set": "valid" },
+    { "range": "[1.10.0rc1, 1.10.1]", "set": "valid" },
+    { "range": "[1.11.0rc1, 1.11.0]", "set": "valid" },
+    { "range": "[1.12.0rc1, 1.12.0]", "set": "valid" },
+    { "range": "[1.13.0rc1, 1.13.2]", "set": "valid" },
+    { "range": "[1.14.0rc1, 1.14.0]", "set": "valid" },
+    { "range": "[1.15.0rc1, 1.15.0]", "set": "valid" },
+    { "range": "[1.16.0rc1, 1.16.3]", "set": "valid" },
+    { "range": "[1.17.0rc1, 1.17.1]", "set": "valid" },
+    { "range": "1.18.0", "set": "valid" },
+    { "range": "[1.19.0, 1.19.3]", "set": "valid" },
+    { "range": "1.20.0", "set": "valid" },
+    { "range": "[1.21.0, 1.21.1]", "set": "valid" },
+    { "range": "1.22.0", "set": "valid" },
+    { "range": "[1.23.0, 1.23.1]", "set": "valid" },
+
+    { "range": "< 1.6.0rc1", "val": "14.04", "set": "base" },
+    { "range": "[1.6.0rc1, 1.9.0rc1)", "val": "16.04", "set": "base" },
+    { "range": "[1.9.0rc1, 1.14.0rc1)", "val": "18.04", "set": "base" },
+    { "range": "[1.14.0rc1, 1.18.0)", "val": "20.04", "set": "base" },
+    { "range": ">= 1.18.0", "val": "22.04", "set": "base" }
+]

@@ -1,0 +1,1 @@
+# Just a placeholder file avoid `traffic` failing to generate

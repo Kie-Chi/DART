@@ -1,0 +1,8 @@
+[
+    { "range": "2.0.0", "set": "valid" },
+    { "range": "[2.1.0, 2.1.1]", "set": "valid" },
+    { "range": "2.2.0", "set": "valid" },
+    { "range": "2.3.0", "set": "valid" },
+
+    { "range": "<= 2.3.0", "val": "18.04", "set": "base" }
+]

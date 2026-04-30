@@ -1,0 +1,297 @@
+"""
+DNS Builder Registries
+
+This module contains registry classes for dynamic class discovery and registration.
+
+Dependencies:
+- protocols: For Protocol type hints
+- abstractions: For abstract base classes used in discovery
+"""
+
+from typing import Dict, Type, Set, Optional, Tuple, TypeVar, Generic, List
+from abc import ABC, abstractmethod
+import logging
+
+from . import constants
+from .protocols import BehaviorProtocol, ImageProtocol, IncluderProtocol, ZoneGeneratorProtocol, SectionProtocol
+from .abstractions import Behavior, Includer, InternalImage
+from .sections import Section
+from .utils import discover_classes, extract_bhv_info, extract_img_info, extract_inc_info, override
+
+logger = logging.getLogger(__name__)
+
+K = TypeVar('K')
+V = TypeVar('V')
+
+class Registry(Generic[K, V], ABC):
+    """
+    An abstract base class for a generic discoverable registry.
+    """
+    
+    # --- Configuration: To be defined by subclasses ---
+    package: Optional[str] = None # package to scan
+    base_class: Optional[Type] = None # base class to discover
+    
+    def __init__(self):
+        self._registry: Dict[K, V] = {}
+        
+        if self.package is None or self.base_class is None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} must define class attributes "
+                "'package' and 'base_class'."
+            )
+            
+        logger.debug(f"Initialized {self.__class__.__name__}")
+        
+    def register(self, key: K, value: V):
+        self._registry[key] = value
+        logger.debug(f"Registered in {self.__class__.__name__}: {key} -> {getattr(value, '__name__', str(value))}")
+        
+    def get(self, key: K) -> Optional[V]:
+        return self._registry.get(key)
+
+    @property
+    def registry(self) -> Dict[K, V]:
+        return self._registry
+        
+    @abstractmethod
+    def _register_item(self, class_name: str, discovered_class: Type[V]):
+        """
+        Abstract method: Defines the logic to register a single discovered class.
+        This is the primary method subclasses need to implement.
+        """
+        raise NotImplementedError
+
+    def discover(self):
+        """
+        Template method to automatically discover and register classes.
+        """
+        logger.debug(f"Starting discovery for {self.__class__.__name__} in '{self.package}'...")
+        from .utils import discover_classes
+        discovered = discover_classes(
+            self.package, 
+            self.base_class, 
+            exclude_abstract=True, 
+            exclude_base=True
+        )
+        
+        for name, obj in discovered.items():
+            self._register_item(name, obj)
+            
+        logger.debug(f"Discovery for {self.__class__.__name__} finished. Total items: {len(self._registry)}")
+
+
+class BehaviorRegistry(Registry[Tuple[str, str], Type[BehaviorProtocol]]):
+    """
+    Registry for dynamically discovering and managing behavior classes.
+    Uses reflection to automatically find and register behavior implementations.
+    """
+    package = "dnsbuilder.bases.behaviors"
+    base_class = Behavior
+
+    @override
+    def _register_item(self, class_name: str, discovered_class: Type[BehaviorProtocol]):
+        software, behavior_type = extract_bhv_info(class_name, constants.BEHAVIOR_TYPES)
+        if software and behavior_type:
+            key = (software, behavior_type)
+            self.register(key, discovered_class)
+
+    def behavior(self, software: str, behavior_type: str) -> Optional[Type[BehaviorProtocol]]:
+        return self.get((software, behavior_type))
+
+    def get_supports(self) -> Set[str]:
+        """Get all supported software types."""
+        return {sw for (sw, _) in self.registry.keys()}
+
+    def get_all_behaviors(self) -> Set[str]:
+        """Get all available behavior types across all software."""
+        return {b_type for (_, b_type) in self.registry.keys()}
+
+class ImageRegistry(Registry[str, Type[ImageProtocol]]):
+    """
+    Registry for dynamically discovering and managing image classes.
+    Uses reflection to automatically find and register image implementations.
+    """
+    package = "dnsbuilder.bases.internal"
+    base_class = InternalImage
+    
+    @override
+    def _register_item(self, class_name: str, discovered_class: Type[ImageProtocol]):
+        software = extract_img_info(class_name)
+        if software:
+            self.register(software, discovered_class)
+
+    def image(self, software: str) -> Optional[Type[ImageProtocol]]:
+        return self.get(software)
+
+    def get_supports(self) -> Set[str]:
+        return set(self.registry.keys())
+
+
+class IncluderRegistry(Registry[str, Type[IncluderProtocol]]):
+    """
+    Registry for dynamically discovering and managing includer classes.
+    Uses reflection to automatically find and register includer implementations.
+    """
+    package = "dnsbuilder.bases.includers"
+    base_class = Includer
+
+    @override
+    def _register_item(self, class_name: str, discovered_class: Type[IncluderProtocol]):
+        software = extract_inc_info(class_name)
+        if software:
+            self.register(software, discovered_class)
+
+    def includer(self, software: str) -> Optional[Type[IncluderProtocol]]:
+        return self.get(software)
+
+    def get_supports(self) -> Set[str]:
+        return set(self.registry.keys())
+
+
+class ZoneGeneratorRegistry(Registry[str, Type[ZoneGeneratorProtocol]]):
+    """
+    Registry for managing zone generator implementations.
+
+    Unlike other registries, this does NOT auto-discover - zone generators
+    are registered manually by plugins or the default is used.
+
+    This allows different DNS software to provide custom zone file formats.
+    """
+    package = None  # No auto-discovery
+    base_class = None  # No auto-discovery
+
+    def __init__(self):
+        # Bypass the parent __init__ which requires package and base_class
+        self._registry: Dict[str, Type[ZoneGeneratorProtocol]] = {}
+        logger.debug(f"Initialized {self.__class__.__name__}")
+
+    def _register_item(self, class_name: str, discovered_class: Type[ZoneGeneratorProtocol]):
+        """Not used - manual registration only."""
+        pass
+
+    def generator(self, software: str) -> Optional[Type[ZoneGeneratorProtocol]]:
+        """Get a zone generator class by software type."""
+        return self.get(software)
+
+    def get_supports(self) -> Set[str]:
+        """Get all software types with registered zone generators."""
+        return set(self.registry.keys())
+
+
+class SectionRegistry(Registry[str, Type[SectionProtocol]]):
+    """
+    Registry for managing section definitions for different DNS software.
+
+    Uses reflection to automatically find and register section implementations
+    from the bases.sections module.
+    """
+
+    package = "dnsbuilder.bases.sections"
+    base_class = Section
+
+    @override
+    def _register_item(self, class_name: str, discovered_class: Type[SectionProtocol]):
+        """
+        Auto-discover and register section classes.
+
+        Extracts software name from class name (e.g., BindSection -> bind).
+        """
+        software = self._extract_software_name(class_name)
+        if software:
+            self.register(software, discovered_class)
+            logger.debug(f"Auto-registered section '{software}' from class '{class_name}'")
+
+    def _extract_software_name(self, class_name: str) -> Optional[str]:
+        """
+        Extract software name from Section class name.
+
+        Examples:
+            BindSection -> bind
+            UnboundSection -> unbound
+            PdnsRecursorSection -> pdns_recursor
+            KnotResolverSection -> knot_resolver
+            KnotResolver6Section -> knot_resolver6
+        """
+        if not class_name.endswith("Section"):
+            return None
+
+        # Remove 'Section' suffix
+        name_part = class_name[:-7]  # Remove 'Section'
+
+        # Convert CamelCase to snake_case
+        import re
+        # Convert CamelCase to snake_case (but preserve trailing digits)
+        # First handle CamelCase: insert underscore before uppercase letters
+        snake_case = re.sub(r'([A-Z])', r'_\1', name_part).lower()
+        # Remove leading underscore if present
+        if snake_case.startswith('_'):
+            snake_case = snake_case[1:]
+
+        return snake_case
+
+    def section(self, software: str) -> Optional[Type[SectionProtocol]]:
+        """Get a section class by software type."""
+        return self.get(software)
+
+    def get_supports(self) -> Set[str]:
+        """Get all software types with registered sections."""
+        return set(self.registry.keys())
+
+
+# Global registries
+behavior_registry = BehaviorRegistry()
+image_registry = ImageRegistry()
+includer_registry = IncluderRegistry()
+zone_generator_registry = ZoneGeneratorRegistry()
+section_registry = SectionRegistry()
+
+
+def initialize_registries(
+    load_plugins: bool = True,
+    plugin_config: Optional[List[str]] = None
+):
+    """
+    Initialize the global registries with auto-discovery.
+
+    This should be called once during application startup.
+
+    Args:
+        load_plugins: Whether to load plugins (default: True)
+        plugin_config: Optional list of plugin specs from configuration
+    """
+    logger.debug("Initializing behavior, image, includer, and section registries...")
+
+    # Auto-discover built-in behaviors
+    behavior_registry.discover()
+
+    # Auto-discover built-in images
+    image_registry.discover()
+
+    # Auto-discover built-in includers
+    includer_registry.discover()
+
+    # Auto-discover built-in sections
+    section_registry.discover()
+
+    # Zone generator registry does not auto-discover
+    # It is populated by plugins registering their custom generators
+    # If no plugin registers a generator for a software, the default is used
+
+    logger.debug(f"Discovered {len(behavior_registry.registry)} behavior implementations")
+    logger.debug(f"Discovered {len(image_registry.registry)} image implementations")
+    logger.debug(f"Discovered {len(includer_registry.registry)} includer implementations")
+    logger.debug(f"Discovered {len(section_registry.registry)} section definitions")
+    logger.debug(f"Supported software types: {behavior_registry.get_supports()}")
+
+    # Load plugins after built-in discovery
+    if load_plugins:
+        from .plugins import init_plugins
+        loaded = init_plugins(plugin_config)
+        if loaded:
+            logger.info(f"Loaded plugins: {loaded}")
+            logger.debug(f"After plugins - Supported software types: {behavior_registry.get_supports()}")
+            logger.debug(f"After plugins - Zone generators: {zone_generator_registry.get_supports()}")
+            logger.debug(f"After plugins - Sections: {section_registry.get_supports()}")
+
+

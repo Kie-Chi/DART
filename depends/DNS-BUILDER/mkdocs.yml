@@ -1,0 +1,73 @@
+site_name: DNSB
+site_description: DNSBuilder documentation and usage guide
+docs_dir: doc
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.top
+    - navigation.tabs
+    - content.code.copy
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+  - git-revision-date-localized:
+      enable_creation_date: true
+  - swagger-ui-tag:
+      docExpansion: list
+      tryItOutEnabled: false
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - footnotes
+  - meta
+  - def_list
+  - attr_list
+  - md_in_html
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.magiclink
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - mdx_truly_sane_lists
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation & Running: root/install.md
+    - Getting Started: root/getting-started.md
+  - CLI Command Reference: cli.md
+  - Configuration Reference:
+    - Overview: config/index.md
+    - Configuration Processing Pipeline: config/processing-pipeline.md
+    - Top-level Configuration: config/top-level.md
+    - Service Configuration: config/builds.md
+    - Internal Image Configuration: config/images.md
+    - External Image Configuration: config/external-images.md
+    - Automation Scripts: config/auto.md
+  - Syntax & Rules:
+    - Overview: rule/index.md
+    - Configuration Generation Mechanism: config-generation.md
+    - Merge & Override Rules: rule/merge-and-override.md
+    - Standard Service Templates: rule/build-templates.md
+    - Behavior DSL: rule/behavior-dsl.md
+    - Built-in Variables & Placeholders: rule/builtins-and-placeholders.md
+    - File Paths & FS: rule/paths-and-fs.md
+  - Experimental Features:
+    - DNSSEC Support: dnssec.md
+    - Plugin System: plugin.md
+    - Attribute Override: dnsbattribute.md
+  - Deprecated:
+    - Overview: old/index.md
+    - Comprehension Syntax: old/comprehension.md
+  - Resources Reference: resources.md
+  - API:
+      - Overview: api/index.md
+      - OpenAPI: api/openapi.md
+  - FAQ: faq.md

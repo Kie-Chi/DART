@@ -1,0 +1,390 @@
+# DNSBuilder\src\dnsbuilder\io\path.py
+
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
+from pathlib import PurePosixPath, PureWindowsPath, PurePath, PosixPath, WindowsPath, Path
+from urllib.parse import urlparse, parse_qs
+from .. import constants
+from ..exceptions import InvalidPathError
+from ..utils import override
+
+# just ignore these lines
+os_type = 'nt' if type(Path()) is WindowsPath else 'posix'
+os_type = 'posix' if type(Path()) is PosixPath else os_type
+# end
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class SectionReference:
+    """
+    Parsed section reference from a configuration file path.
+    Supports format: /path/to/file.conf[#section][?param=value&param2=value2]
+    """
+    file_path: str  # Original file path
+    section: str = "global"
+    params: Dict[str, str] = field(default_factory=dict)
+
+
+def parse_sr(path_str: str) -> Tuple[SectionReference, bool]:
+    """
+    Parse a path string to extract section and parameters.
+
+    Supports two formats:
+    1. Standard URL format: /path/to/file.conf[?param=value]#section
+       - e.g., /etc/conf?name=example.com#options
+    2. Suffix format (backward compatible): /path/to/file.conf.section
+       - e.g., /etc/conf.options
+
+    Priority: #fragment > .suffix > "global"
+    Examples:
+        >>> parse_section_reference("/usr/local/etc/conf.options")
+        SectionReference(file_path='/usr/local/etc/conf.options', section='options', params={})
+
+        >>> parse_section_reference("/usr/local/etc/conf?name=example.com#options")
+        SectionReference(file_path='/usr/local/etc/conf', section='options', params={'name': 'example.com'})
+
+        >>> parse_section_reference("/usr/local/etc/conf#options")
+        SectionReference(file_path='/usr/local/etc/conf', section='options', params={})
+    """
+    # urlparse to handle ?query#fragment (standard URL format)
+    parsed = urlparse(f"file://{path_str}" if not path_str.startswith(('file://', '/')) else path_str)
+    file_path = parsed.path if parsed.path else path_str
+
+    # Default values
+    section = "global"
+    params = {}
+
+    # Parse query string as parameters
+    if parsed.query:
+        raw_params = parse_qs(parsed.query)
+        params = {k: v[0] if len(v) == 1 else v for k, v in raw_params.items()}
+
+    # Determine section - priority: #fragment > .suffix > "global"
+    if parsed.fragment:
+        section = parsed.fragment
+    else:
+        suffixes = DNSBPath(file_path).suffixes
+        if (
+            len(suffixes) >= 1 and suffixes[-1] == constants.DEFAULT_CONF_SUFFIX
+        ) or (
+            len(suffixes) >= 2 and suffixes[-2] == constants.DEFAULT_CONF_SUFFIX
+        ):
+            section = suffixes[-1].strip(".") if (len(suffixes) >= 2 and suffixes[-2] == constants.DEFAULT_CONF_SUFFIX) else 'global'
+            return SectionReference(file_path=path_str, section=section, params=params), True
+        else:
+            return None, False
+            
+
+    return SectionReference(file_path=path_str, section=section, params=params), True
+
+
+def add_protocol_checkers(cls):
+    """
+    Class Decorator to add is_protocol for cls
+    """
+
+    def create_checker(protocol_name):
+        def checker(self):
+            return getattr(self, "protocol", None) == protocol_name
+
+        checker.__name__ = f"is_{protocol_name}"
+        return checker
+
+    for protocol in constants.KNOWN_PROTOCOLS:
+        method_name = f"is_{protocol}"
+        checker_method = create_checker(protocol)
+        setattr(cls, method_name, method_name)
+        setattr(cls, method_name, checker_method)
+    return cls
+
+
+@add_protocol_checkers
+class DNSBPath(PurePosixPath):
+    """
+    It can represent both local file paths and URLs, automatically parsing
+    them to provide protocol and host information. 
+    """
+
+    def __new__(cls, *args, **kwargs):
+        if not args:
+            return super().__new__(cls)
+
+        is_origin = kwargs.pop("is_origin", False)
+        protocol_kw = kwargs.pop("protocol", None)
+        host_kw = kwargs.pop("host", None)
+        query_kw = kwargs.pop("query", None)
+        fragment_kw = kwargs.pop("fragment", None)
+
+        # Protocol and host are passed explicitly, so we skip parsing.
+        __first_part = args[0]
+        if protocol_kw is not None:
+            obj = super().__new__(cls, *args, **kwargs)
+            obj.protocol = protocol_kw
+            obj.host = host_kw if host_kw is not None else ""
+            obj.query_str = query_kw if query_kw is not None else ""
+            obj.fragment = fragment_kw if fragment_kw is not None else ""
+        else:
+            path_str = str(args[0])
+            parsed = urlparse(path_str)
+
+            if parsed.scheme in constants.KNOWN_PROTOCOLS:
+                obj_protocol = parsed.scheme
+                obj_host = parsed.netloc
+                path_part = parsed.path
+                obj_query = parsed.query
+                obj_fragment = parsed.fragment
+            else:
+                obj_protocol = "file"
+                obj_host = ""
+                # help to convert windows path to posix path
+                path_part = PurePath(path_str).as_posix()
+                obj_query = ""
+                obj_fragment = ""
+
+            obj = super().__new__(cls, path_part, *(args[1:]), **kwargs)
+            obj.protocol = obj_protocol
+            obj.host = obj_host
+            obj.query_str = obj_query
+            obj.fragment = obj_fragment
+            __first_part = path_part
+
+        obj.is_origin = is_origin
+        obj.__first_part = __first_part
+        return obj
+
+    def _reconstruct(self, new_path_part: PurePosixPath, new_fragment: str = None) -> "DNSBPath":
+        """
+        Internal helper to create a new DNSBPath.
+        For git protocol, operations affect the fragment.
+        For other protocols, operations affect the path_part.
+        """
+        if hasattr(new_path_part, '__path__'):
+            path_str = new_path_part.__path__()
+        else:
+            path_str = str(new_path_part)
+            
+        return DNSBPath(
+            path_str,
+            is_origin=self.is_origin,
+            protocol=self.protocol,
+            host=self.host,
+            query=self.query_str,
+            fragment=new_fragment if new_fragment is not None else self.fragment,
+        )
+    
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("is_origin", None)
+        kwargs.pop("protocol", None)
+        kwargs.pop("host", None)
+        kwargs.pop("query", None)
+        kwargs.pop("fragment", None)
+        super().__init__(self.__first_part, *(args[1:]), **kwargs)
+
+    def is_disk(self) -> bool:
+        return self.protocol in ["file", "raw"]
+    
+    def is_readonly(self) -> bool:
+        if self.protocol in ["file", "raw", "temp", "cache"]:
+            return False
+        return True
+
+    @property
+    @override
+    def parent(self):
+        # For git protocol, parent operation should work on fragment
+        if self.protocol == "git":
+            if self.fragment:
+                new_fragment = str(PurePosixPath(self.fragment).parent)
+                # Keep path_part unchanged, only update fragment
+                return self._reconstruct(PurePosixPath(self.__path__()), new_fragment)
+            else:
+                return self
+        # For other protocols, parent works on path_part
+        return self._reconstruct(super().parent)
+
+    @override
+    def joinpath(self, *args):
+        # For git protocol, join should work on fragment
+        if self.protocol == "git":
+            if self.fragment:
+                new_fragment = str(PurePosixPath(self.fragment).joinpath(*args))
+            else:
+                new_fragment = str(PurePosixPath(*args))
+            return self._reconstruct(PurePosixPath(self.__path__()), new_fragment)
+        # For other protocols, join works on path_part
+        return self._reconstruct(super().joinpath(*args))
+
+    @override
+    def __truediv__(self, other):
+        # For git protocol, join should work on fragment
+        if self.protocol == "git":
+            if self.fragment:
+                new_fragment = str(PurePosixPath(self.fragment) / other)
+            else:
+                new_fragment = str(PurePosixPath(other))
+            # Keep path_part unchanged, only update fragment
+            return self._reconstruct(PurePosixPath(self.__path__()), new_fragment)
+        # For other protocols, join works on path_part
+        return self._reconstruct(super().joinpath(other))
+
+    @override
+    def __rtruediv__(self, other):
+        if self.is_absolute():
+            raise InvalidPathError(
+                "Can not join absolute path with relative path, like path + /path"
+            )
+        return self._reconstruct(super().__rtruediv__(other))
+
+    @property
+    def need_copy(self) -> bool:
+        if self.is_origin:
+            return False
+        if self.protocol != "file":
+            return True
+        return not self.is_absolute()
+        
+
+    @property
+    def need_check(self) -> bool:
+        if self.is_origin:
+            return False
+        return True
+
+    @override
+    def __str__(self) -> str:
+        """
+        Return the string representation of the path, reconstructing the full URI.
+        """
+        path_part = super().__str__()
+
+        if self.protocol == "file":
+            return path_part
+
+        if self.protocol == "resource":
+            return f"resource:{path_part}"
+
+        # For other URL-like protocols
+        host_part = f"//{self.host}" if self.host else ""
+        query_part = f"?{self.query_str}" if self.query_str else ""
+        fragment_part = f"#{self.fragment}" if self.fragment else ""
+        return f"{self.protocol}:{host_part}{path_part}{query_part}{fragment_part}"
+    
+    def __path__(self) -> str:
+        return super().__str__()
+
+    def resolve(self, base: "DNSBPath") -> "DNSBPath":
+        """
+        Resolve the path relative to the base path.
+        Args:
+            base: The base path to resolve the path relative to.
+        Returns:
+            The resolved path.
+        """
+        if self.protocol != "file":
+            return self
+        if self.is_absolute():
+            return self
+        return base / self
+
+    @property
+    def __rname__(self) -> str:
+        """
+        Return the name of the true path.
+        """
+        if self.fragment and self.fragment != ".":
+            return PurePosixPath(self.fragment).name
+        return self.name
+
+    @property
+    def query(self) -> dict:
+        if not hasattr(self, "_query_dict"):
+            from urllib.parse import parse_qs
+            self._query_dict = parse_qs(self.query_str)
+        return self._query_dict
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}('{self}')"
+    
+    @override
+    def is_absolute(self) -> bool:
+        """
+        Return True if the path is absolute.
+        For URLs, the path part must be absolute (start with /).
+        """
+        return is_path_absolute(self.__path__())
+    
+    @override
+    def __eq__(self, other) -> bool:
+        """
+        Compare two DNSBPath objects for equality.
+        Two paths are equal if they have the same protocol, host, path, query, and fragment.
+        """
+        if not isinstance(other, DNSBPath):
+            return False
+        
+        return (
+            self.protocol == other.protocol and
+            self.host == other.host and
+            self.__path__() == other.__path__() and
+            self.query_str == other.query_str and
+            self.fragment == other.fragment
+        )
+    
+    def __hash__(self) -> int:
+        """
+        Return hash of the DNSBPath.
+        Hash is based on protocol, host, path, query, and fragment.
+        """
+        return hash((
+            self.protocol,
+            self.host,
+            self.__path__(),
+            self.query_str,
+            self.fragment
+        ))
+
+def is_path_valid(path: str) -> bool:
+    """
+    Check if a path is valid.
+    """
+    is_windows = False
+    is_posix = False
+    try:
+        PureWindowsPath(path)
+        is_windows = True
+    except (ValueError, TypeError, OSError):
+        pass
+    except Exception:
+        raise InvalidPathError(f"Path is invalid: {path}")
+    try:
+        PurePosixPath(path)
+        is_posix = True
+    except (ValueError, TypeError, OSError):
+        pass
+    except Exception:
+        raise InvalidPathError(f"Path is invalid: {path}")
+    return is_windows or is_posix
+
+
+def is_path_absolute(path: str) -> bool:
+    """
+    Check if a path is absolute.
+    """
+    is_absolute = False
+    try:
+        is_absolute = PurePosixPath(path).is_absolute()
+    except (ValueError, TypeError, OSError):
+        pass
+    except Exception:
+        raise InvalidPathError(f"Path is invalid: {path}")
+    if is_absolute:
+        return True
+    try:
+        return PureWindowsPath(path).is_absolute()
+    except (ValueError, TypeError, OSError):
+        pass
+    except Exception:
+        raise InvalidPathError(f"Path is invalid: {path}")

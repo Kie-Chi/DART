@@ -1,0 +1,183 @@
+query_targets:
+  # RFC1123 Tests
+  - name: "rfc1123_tc_truncated"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_tc_truncated"
+
+  - name: "rfc1123_ttl_zero"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_ttl_zero_response"
+
+  # RFC2308 Tests
+  - name: "rfc2308_soa_ttl_minimum"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_soa_ttl_minimum"
+
+  - name: "rfc2308_negative_response_soa"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_negative_response_soa"
+
+  # RFC2930 Tests
+  - name: "rfc2930_tkey_query"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_tkey_query"
+
+  # RFC3403 Tests
+  - name: "rfc3403_naptr_both_fields"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_naptr_both_fields"
+
+  # RFC6672 Tests
+  - name: "rfc6672_dname_query"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_dname_query"
+
+  - name: "rfc6672_dname_response"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_dname_response"
+
+  # RFC6761 Tests - Special Domain Names
+  - name: "rfc6761_localhost_aaaa"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_localhost_aaaa"
+
+  - name: "rfc6761_localhost_a"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_localhost_a"
+
+  - name: "rfc6761_test_domain_ns"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_test_domain_ns"
+
+  - name: "rfc6761_invalid_domain_ns"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_invalid_domain_ns"
+
+  # RFC6891 Tests - EDNS
+  - name: "rfc6891_multi_opt_records"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_multi_opt_records"
+
+  - name: "rfc6891_opt_non_root_name"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_opt_non_root_name"
+
+  - name: "rfc6891_badvers_response"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_badvers_response"
+
+  - name: "rfc6891_opt_invalid_value"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_opt_invalid_value"
+
+  - name: "rfc6891_edns_version_high"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_edns_version_high"
+
+  # RFC7830 Tests - Padding
+  - name: "rfc7830_multi_padding_options"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_multi_padding_options"
+
+  # RFC7686 Tests - .onion domains
+  - name: "rfc7686_onion_domain"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_onion_domain"
+
+  # RFC7793 Tests - Shared Address Space PTR
+  - name: "rfc7793_shared_address_ptr"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_shared_address_ptr"
+
+  # RFC8020 Tests - NXDOMAIN caching
+  - name: "rfc8020_nxdomain_response"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_nxdomain_response"
+
+  # RFC8375 Tests - home.arpa
+  - name: "rfc8375_home_arpa"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_home_arpa"
+
+  # RFC8659 Tests - CAA
+  - name: "rfc8659_caa_invalid_issue"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_caa_invalid_issue"
+
+  # RFC8945 Tests - TSIG
+  - name: "rfc8945_multi_tsig_records"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_multi_tsig_records"
+
+  # RFC8914 Tests - Extended DNS Errors
+  - name: "rfc8914_rd_flag_clear"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_rd_flag_clear"
+
+  # RFC9460 Tests - SVCB/HTTPS
+  - name: "rfc9460_svcb_alias_and_service"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_alias_and_service"
+
+  - name: "rfc9460_svcb_alias_with_params"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_alias_with_params"
+
+  - name: "rfc9460_svcb_alias_to_root"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_alias_to_root"
+
+  - name: "rfc9460_svcb_missing_alpn"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_missing_alpn"
+
+  - name: "rfc9460_https_query"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_https_query"
+
+  - name: "rfc9460_svcb_multiple_priorities"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_multiple_priorities"
+
+  # RFC9461 Tests - SVCB Parameters
+  - name: "rfc9461_svcb_no_alpn"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_svcb_no_alpn"
+
+  # RFC9462 Tests - resolver.arpa
+  - name: "rfc9462_resolver_arpa"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_resolver_arpa"
+
+  # RFC1034 Tests - CNAME/NS/Wildcard
+  - name: "rfc1034_wildcard_query"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_wildcard_query"
+
+  - name: "rfc1034_cname_chain"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_cname_chain"
+
+  - name: "rfc1034_cname_loop"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_cname_loop"
+
+  # RFC1035 Tests
+  - name: "rfc1035_authority_response_no_qr"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_authority_response_no_qr"
+
+  # RFC4025 Tests - IPSECKEY
+  - name: "rfc4025_ipseckey_gateway_mismatch"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_ipseckey_gateway_mismatch"
+
+  # RFC6840 Tests - DNSSEC CD flag
+  - name: "rfc6840_cd_flag_query"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_cd_flag_query"
+
+  # RFC8145 Tests - edns-key-tag
+  - name: "rfc8145_edns_key_tag_option"
+    file: "/usr/local/etc/packets/custom_packets.py"
+    func: "gen_edns_key_tag_option"

@@ -1,0 +1,229 @@
+name: "master"
+inet: "10.10.66.0/24"
+images:
+  - name: "root"
+    ref: "bind:9.18.0"
+  - name: "tld"
+    ref: "bind:9.18.0"
+  - name: "sld"
+    ref: "bind:9.18.0"
+  - name: "recursor"
+    ref: "bind:9.18.0"
+  - name: "urecursor"
+    ref: "unbound:1.17.1"
+  - name: "attacker"
+    ref: "python:3.12.0"
+  - name: "monitor"
+    ref: "python:3.12.0"
+    util:
+      - bind9-utils
+      - unbound
+
+vars:
+  roots:
+    - 198.41.0.4      # A.ROOT-SERVERS.NET (Verisign)
+    - 170.247.170.2   # B.ROOT-SERVERS.NET (USC/ISI)
+    - 192.33.4.12     # C.ROOT-SERVERS.NET (Cogent)
+    - 199.7.91.13     # D.ROOT-SERVERS.NET (UMD)
+    - 192.203.230.10  # E.ROOT-SERVERS.NET (NASA)
+    - 192.5.5.241     # F.ROOT-SERVERS.NET (ISC)
+    - 192.112.36.4    # G.ROOT-SERVERS.NET (DOD)
+    - 198.97.190.53   # H.ROOT-SERVERS.NET (ARL)
+    - 192.36.148.17   # I.ROOT-SERVERS.NET (Nordu)
+    - 192.58.128.30   # J.ROOT-SERVERS.NET (Verisign)
+    - 193.0.14.129    # K.ROOT-SERVERS.NET (RIPE NCC)
+    - 199.7.83.42     # L.ROOT-SERVERS.NET (ICANN)
+    - 202.12.27.33    # M.ROOT-SERVERS.NET (WIDE)
+
+builds:
+  # - bind:
+  #     image: "recursor"
+  #     ref: "std:recursor"
+  - bind-new:
+      image: "kometchtech/bind:9.21.15"
+      ref: "std:recursor"
+  # - unbound:
+  #     image: "urecursor"
+  #     ref: "std:recursor"
+  - unbound-new:
+      image: "klutchell/unbound:1.24.2"
+      command: "-d -c /usr/local/etc/unbound/unbound.conf"
+      ref: "std:recursor"
+  # - pdns_recursor:
+  #     image: "powerdns/pdns-recursor-45:4.5.4"
+  #     ref: "std:recursor"
+  #     command: --config-dir=/usr/local/etc
+  - pdns_recursor-new:
+      image: "powerdns/pdns-recursor-52:5.2.6"
+      ref: "std:recursor"
+      command: --config-dir=/usr/local/etc --enable-old-settings
+  # - knot_resolver:
+  #     image: "cznic/knot-resolver:v5.5.2"
+  #     command: "-n -v -c /usr/local/etc/kresd.conf"
+  #     ref: "std:recursor"
+  - knot_resolver-new:
+      image: "cznic/knot-resolver:v6.0.16"
+      command: "-c /usr/local/etc/kresd.yml"
+      ref: "std:recursor"
+  - attacker:
+      image: "attacker"
+      volumes:
+        - ../../depends/DNS-FUZZER:/usr/local/etc
+        - custom_packets.py:/usr/local/etc/packets/custom_packets.py
+      auto:
+        modify: |
+          import yaml
+          import ipaddress as ipa
+
+          # read top-1k domains from top-1k.txt
+          customs = yaml.safe_load(fs.read_text(workdir / "test_custom.yml"))
+          _a_cfg = {
+            "dnsm_address": str(next(ipa.ip_network("${proj.inet}").hosts())),
+            "dnsm_port": 9099,
+            "compare_window_size": 30,
+          }
+          config["files"]["/usr/local/etc/fuzz_analyze.yml"] = yaml.dump(_a_cfg)
+
+          r2ip = config.get("environment", {}).get("r2ip", {})
+          _c_cfg = {
+            "target_servers": [ip for ip in r2ip.values()],
+            "wait_for_analyze": True,
+            "concurrent_requests": len(r2ip),
+            "query_targets": customs["query_targets"],
+            "analyze_wait_timeout": 5,
+          }
+          config["files"]["/usr/local/etc/fuzz_client.yml"] = yaml.dump(_c_cfg)
+          config["environment"].pop("r2ip", None)
+      command: "bash -c 'cd /usr/local/etc && pip install . && dnsf analyze'"
+      # command: tail -f /dev/null
+  - monitor:
+      image: "monitor"
+      address: ""
+      network_mode: "host"
+      environment:
+        ANAME: "attacker"
+      command: "bash -c 'cd /usr/local/etc && pip install . && dnsm monitor'"
+      volumes:
+        - "../../depends/DNS-Monitor:/usr/local/etc"
+      auto:
+        modify: |
+          import yaml
+          # get all software names
+          rnames = [name.strip() for name in config["environment"]["RNAMES"].split(",")]
+          r2s = config["environment"].pop("r2s")
+
+          # add volumes for each software
+          config["volumes"].extend([
+            f"${{origin}}./{name}/contents/{s}:/usr/local/var/{name}:rw"
+            for name, s in r2s.items()
+          ])
+          # write file to dnsm.yml
+          r2v = config["environment"].pop("r2v")
+          r2ip = config["environment"].pop("r2ip")
+          cfg = {}
+          cfg["cidr"] = "${proj.inet}"
+          cfg["server"] = {
+            "enable": True,
+            "address": "0.0.0.0",
+            "port": 9099,
+          }
+          cfg["resolvers"] = {}
+          _r_dp = 12345
+          _c_dp = 8080
+          for name in rnames:
+            cfg["resolvers"][name] = {
+              "client_ip": "${srv.${environment.ANAME}.ip}",
+              "resolver_ip": r2ip[name],
+              "enable_server": True,
+              "analysis_port": _r_dp,
+            }
+            _r_dp += 1
+          
+          # cfg["caches"] = {}
+          # for name in rnames:
+          #   cfg["caches"][name] = {
+          #     "server_type": r2s[name],
+          #     "resolver_ip": r2ip[name],
+          #     "enable_server": True,
+          #     "detail_mode": True,
+          #     "analysis_port": _c_dp,
+          #   }
+          #   if r2s[name] == "bind":
+          #     cfg["caches"][name]["bind_dump_file"] = r2v[name]
+          #   _c_dp += 1
+          cfg["traffic"] = {
+            "write_pcap": True
+          }
+          files = config.setdefault("files", {})
+          files["/usr/local/etc/dnsm.yml"] = yaml.dump(cfg)
+          config["environment"].update(r2ip)
+auto:
+  setup: |
+    import json
+
+    # search for all recursor
+    rnames = []
+    for srv in config["builds"].keys():
+      _is_r = False
+      ref = config["builds"][srv].get("ref", None)
+      while ref:
+        if ref == "std:recursor":
+          _is_r = True
+          break
+        ref = config["builds"].get(ref, {}).get("ref", None)
+      if _is_r:
+        rnames.append(srv)
+    if rnames:
+      config["builds"]["monitor"]["environment"]["RNAMES"] = ", ".join(rnames)
+
+    # insert behavior root hint for recursor
+    roots = config.get("vars", {}).get("roots", [])
+    for name in rnames:
+      behavs = config["builds"][name].setdefault("behavior", "")
+      behavs += f". hint {','.join(roots)}\n"
+      config["builds"][name]["behavior"] = behavs
+
+    # get all software names for monitor
+    r2s = { name : f"${{srv.{name}.image.software}}" for name in rnames }
+    r2ip = { name : f"${{srv.{name}.ip}}" for name in rnames }
+    config["builds"]["monitor"]["environment"].update({"r2s": r2s, "r2ip": r2ip})
+    config["builds"]["attacker"].setdefault("environment", {}).update({"r2ip": r2ip})
+    config["builds"]["monitor"]["environment"]["R2S"] = json.dumps(r2s)
+    print(config["builds"]["monitor"]["environment"])
+  modify: |
+    # add files for bind software
+    r2s = config["builds"]["monitor"]["environment"]["r2s"]
+    print(r2s)
+    r2v = {}
+    _v = 0
+    for srv, sw in r2s.items():
+      if sw == "bind":
+        origin_file = f"/usr/local/var/bind/named_dump{_v}.db"
+        monitor_file = f"/usr/local/var/{srv}/named_dump{_v}.db"
+        config["builds"][f"{srv}"].setdefault("files", {})
+        config["builds"][f"{srv}"]["files"][f"/usr/local/etc/volumes_dump.conf.options"] = f"dump-file \"{origin_file}\";"
+        _v += 1
+        r2v[srv] = monitor_file
+    # save r2v to environment
+    config["builds"]["monitor"]["environment"].update({"r2v": r2v})
+  
+  post: 
+    - |
+      import json
+
+      # chmod bind content dir
+      r2s = json.loads(config["builds"]["monitor"]["environment"].pop("R2S", "{}"))
+      for srv, sw in r2s.items():
+        if sw == "bind":
+          from pathlib import Path
+
+          # target the generated contents of the 'resolver' service
+          target_path = Path(workdir / "output" / config["name"] / srv / "contents")
+          
+          if target_path.exists():
+            # Recursively chmod 777
+            target_path.chmod(0o777)
+            for item in target_path.rglob("*"):
+              if item.is_file() or item.is_dir():
+                item.chmod(0o777)
+
