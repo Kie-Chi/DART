@@ -1,6 +1,6 @@
 # DNS-SAK
 
-**DNS Spoofing Attack Kit** — a C-based framework for researching and reproducing DNS cache poisoning vulnerabilities.
+a C-based framework for researching and reproducing DNS cache poisoning vulnerabilities.
 
 ## Overview
 
