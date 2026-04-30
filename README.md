@@ -8,7 +8,7 @@ DART is a comprehensive DNS testing framework built on top of [DNS-BUILDER](depe
 dart/
 ├── app/          # Application-layer evaluation
 ├── bugs/         # DNS attack reproduction test suites
-├── depends/      # Dependency tools (DNS-BUILDER, DNS-FUZZER, DNS-Monitor)
+├── depends/      # Dependency tools (DNS-SAK, DNS-BUILDER, DNS-FUZZER, DNS-Monitor)
 ```
 
 ## Key Components
