@@ -1,3 +1,4 @@
 build
 builds
 *.txt
+!CMakeLists.txt
